@@ -86,113 +86,36 @@ def add_contour_lines_to_database(df,cursor,source=None,is_closed=None,contours_
     cursor.execute(cmd)
         
 
-#DEPTH SEARCH
-
-def find_component_at_depth(G,cursor,node,depth,geom):
-    t1=time.time()
-    candidate_nodes=[candidate_node for candidate_node in nx.descendants(G,node) if G.nodes()[candidate_node]['depth']==depth]
-    t2=time.time()
-    print('find in graph took %f'%(t2-t1))
-    if len(candidate_nodes)>0:
-        #print('%i candidates'%len(candidate_nodes))
-
-        t1=time.time()
-        df=get_nodes_data(cursor,candidate_nodes)
-        t2=time.time()
-        print('get data took %f'%(t2-t1))
-
-        t1=time.time()
-        intersection=df['geometry'].apply(lambda ls:geom.within(Polygon(ls)))
-        t2=time.time()
-        print('intersecting %f'%(t2-t1))
         
-        indexes=np.where(intersection)[0]
-        if len(indexes)>0:
-            assert len(indexes)==1
-            return df.iloc[indexes[0]]['id']
-
-
-
-def dichotomic_search(G,cursor,geom):
-    min_depth,max_depth=1,np.max([data['depth'] for _,data in G.nodes(data=True)])
-    root='root'
-    while(max_depth>min_depth+1):
-        middle_depth=(min_depth+max_depth)//2
-        next_root=find_component_at_depth(G,cursor,root,middle_depth,geom)
-        if next_root is not None:
-            root=next_root
-            min_depth,max_depth=middle_depth,max_depth
-        else:
-            min_depth,max_depth=min_depth,middle_depth
-
-    return root
-
-##attention a break pendant la première itération
-def get_maximal_subtree(G,root,max_number_points=1000000):
-    descendants,count,stop=[],0,False
-    df=pd.DataFrame({node:G.nodes()[node] for node in list(nx.descendants(G,root))}).T
-    if len(df)==0:
-        return [],G.nodes()[root]['depth']
-    first=True
-    for depth,sub_df in df.groupby('depth'):
-        count+=np.sum(sub_df['number_points'])
-        if count>max_number_points and not(first):
-            break
-        descendants+=list(sub_df.index)
-        first=False
-    return descendants,depth-1
-                
-
-
-def get_recursive_intersections(G,cursor,osm_edges_df,osm_crs,root='root',max_product_number_of_points=float('1e10')):
-    nb_osm_points=np.sum(osm_edges_df['number_of_points'])
-    contour_nodes,max_depth=get_maximal_subtree(G,root,max_number_points=max_product_number_of_points/nb_osm_points)
-    print(root,max_depth)
-
-    if len(contour_nodes)>0:
-        contours_df=get_nodes_data(cursor,contour_nodes)
-        contours_df=gpd.GeoDataFrame(contours_df,geometry='geometry',crs='epsg:4326')
-        contours_df=contours_df.to_crs(osm_crs)
-        contours_df['geometry']=contours_df['geometry'].apply(lambda ls:Polygon(ls))
-        contours_df['depth']=contours_df['id'].apply(lambda node:G.nodes()[node]['depth'])    
-
-        try:
-            intersection_poly=gpd.overlay(contours_df,osm_edges_df,keep_geom_type=False).explode(index_parts=False)
-        except Exception as e:
-            print(e)
-            print(len(contours_df),len(osm_edges_df),contours_df.columns,osm_edges_df.columns)
-        
-        intersection_ls=intersection_poly.copy().drop(columns=['id','number_of_points'])
-        intersection_ls['geometry']=intersection_ls['geometry'].apply(lambda ls:ls.boundary)
-        intersection_ls=intersection_ls.explode(index_parts=False)
-
-        intersection_poly=intersection_poly[intersection_poly.depth==max_depth]
-        if len(intersection_poly)>0:
-            for sub_root,sub_osm_edges_df in intersection_poly.groupby('id'):
-            
-                sub_osm_edges_df=sub_osm_edges_df.loc[:,['edge','number_of_points','geometry']]
-                nb_osm_points=np.sum(sub_osm_edges_df['number_of_points'])
-                sub_intersection_ls=get_recursive_intersections(G,cursor,sub_osm_edges_df,osm_crs,root=sub_root,max_product_number_of_points=max_product_number_of_points)
-                if sub_intersection_ls is not None:
-                    intersection_ls=pd.concat([intersection_ls,sub_intersection_ls],ignore_index=True)
-        return intersection_ls
 
 #BUILD GRAPH
 
-def build_graph(cursor,contours_lines_table_name="contours_lines",tree_edges_table_name="tree_edges"):
+def build_graph(cursor,contours_lines_table_name="contours_lines",tree_edges_table_name="tree_edges",with_distance=None):
     G=nx.DiGraph()
-    cmd="SELECT * FROM %s"%tree_edges_table_name
+    if with_distance is not None:
+        if with_distance:
+            cmd="SELECT * FROM %s WHERE distance IS NOT NULL"%tree_edges_table_name
+        else:
+            cmd="SELECT * FROM %s WHERE distance IS NULL"%tree_edges_table_name
+    else:
+        cmd="SELECT * FROM %s"%tree_edges_table_name
     cursor.execute(cmd)
-    G.add_edges_from([(elem['begin'],elem['end']) for elem in cursor.fetchall()])
+    if with_distance is not None and with_distance:
+        G.add_edges_from([(elem['begin'],elem['end'],{'distance':elem['distance']}) for elem in cursor.fetchall()])
+    else:
+        G.add_edges_from([(elem['begin'],elem['end']) for elem in cursor.fetchall()])
+
     G.add_node('root')
     for node,deg in G.in_degree():
         if node!='root' and deg==0:
             G.add_edge('root',node)
-    cmd="SELECT id,number_points FROM %s"%contours_lines_table_name
+
+    cmd="SELECT id,number_points,elevation FROM %s"%contours_lines_table_name
     cursor.execute(cmd)
-    nx.set_node_attributes(G,{elem['id']:{'number_points':elem['number_points']} for elem in cursor.fetchall()})
+    nx.set_node_attributes(G,{elem['id']:{'number_points':elem['number_points'],'elevation':elem['elevation']} for elem in cursor.fetchall()})
     nx.set_node_attributes(G,{'root':{'number_points':0}})
     add_depth(G)
+    G.remove_node('root')
     return G
 
 def add_depth(G):
@@ -207,7 +130,7 @@ def add_depth(G):
 #ACCESS DATA
 
 def get_level_contours_df(cursor,level,contours_lines_table_name="contours_lines",is_closed=True):
-    cmd="SELECT id,source,is_closed,elevation,ST_asText(geometry) AS geometry FROM %s WHERE elevation=%f" %(contours_lines_table_name,level)
+    cmd="SELECT id,is_closed,elevation,ST_asText(geometry) AS geometry FROM %s WHERE elevation=%f" %(contours_lines_table_name,level)
     if is_closed is not None:
         if is_closed:
             cmd=cmd+" AND is_closed"
@@ -224,12 +147,47 @@ def get_level_contours_df(cursor,level,contours_lines_table_name="contours_lines
 
 def get_nodes_data(cursor,nodes,contours_lines_table_name="contours_lines"):
     nodes_list='(%s)'%','.join([str(node) for node in nodes if node!='root'])
-    cmd="SELECT id,elevation,ST_asText(geometry) AS geometry FROM %s WHERE id IN %s" %(contours_lines_table_name,nodes_list)
+    cmd="SELECT id,elevation,number_points,ST_asText(geometry) AS geometry FROM %s WHERE id IN %s" %(contours_lines_table_name,nodes_list)
     cursor.execute(cmd)
     data= cursor.fetchall()
     data=pd.DataFrame(data)
     data['geometry']=loads(data['geometry'])
+    data=gpd.GeoDataFrame(data,geometry='geometry',crs='epsg:4326')
+
     return data
+
+#DEPTH SEARCH
+
+def decreasing_depth_intersections(osm_edges_df,osm_crs,G,cursor,max_depth,min_depth=0,depth_step=10,max_delta_time_per_level=None,max_delta_time_total=600.):
+    t1=time.time()
+    max_delta_time_per_step=None
+    if max_delta_time_per_level is not None:
+        max_delta_time_per_step=max_delta_time_per_level*depth_step
+    intersection,current_osm_edges=None,None
+    for depth in range(max_depth,min_depth,-depth_step):
+        t2=time.time()
+        contour_nodes=[node for node,data in G.nodes(data=True) if depth-depth_step<data['depth']<=depth]
+        contours_df=get_nodes_data(cursor,contour_nodes)
+        contours_df['depth']=contours_df['id'].apply(lambda node:G.nodes()[node]['depth'])
+        contours_df=contours_df.to_crs(osm_crs)
+        local_intersection=gpd.overlay(contours_df,osm_edges_df,keep_geom_type=False).explode(index_parts=False)
+        if intersection is None:
+            intersection=local_intersection
+            current_osm_edges=set(local_intersection['edge'])
+        else:
+            intersection=pd.concat([intersection,local_intersection],ignore_index=True)
+            current_osm_edges=current_osm_edges.union(set(local_intersection['edge']))
+
+        terminated_edges=current_osm_edges.difference(local_intersection[local_intersection.depth==depth-depth_step+1]['edge'])
+        if len(terminated_edges)>0:
+            osm_edges_df=osm_edges_df[~osm_edges_df['edge'].apply(lambda edge: edge in terminated_edges)]
+        t3=time.time()
+        print('%i<depth<=%i :%f'%(depth-depth_step,depth,t3-t2))
+        if max_delta_time_total is not None and (t3-t1)>max_delta_time_total:
+            break
+        if max_delta_time_per_step is not None and (t3-t2)>max_delta_time_per_step:
+            break
+    return intersection,depth-depth_step+1
 
 #MERGE LINES
 
@@ -238,10 +196,9 @@ def build_open_contour_graph(level_open_contours_df,max_distance=1000,coeff_rest
     for index,row in level_open_contours_df.iterrows():
         ls=row['geometry']
         length=ls.length
-        source=row['source']
         pt1,pt2=ls.boundary.geoms
-        G_extremities.add_node((index,0),geometry=pt1,source=source,x=pt1.x,y=pt1.y,length=length)
-        G_extremities.add_node((index,1),geometry=pt2,source=source,x=pt2.x,y=pt2.y,length=length)
+        G_extremities.add_node((index,0),geometry=pt1,x=pt1.x,y=pt1.y,length=length)
+        G_extremities.add_node((index,1),geometry=pt2,x=pt2.x,y=pt2.y,length=length)
         G_extremities.add_edge((index,0),(index,1),geometry=ls,edge_type='contour',distance=length)
 
 
