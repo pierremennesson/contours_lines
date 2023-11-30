@@ -193,22 +193,28 @@ def decreasing_depth_intersections(osm_edges_df,osm_crs,G,cursor,max_depth,min_d
 
 #OSM NODES ELEVATION COMPUTATION
 
+##deal with case k_max>len(contour_nodes)
 def select_affine_basis_for_point(osm_pt,local_contour_data,k_max=3):
     elevations=np.array(local_contour_data['elevation'])
-    projected_pts=[ls.interpolate(ls.project(osm_pt)) for ls in list(local_contour_data['geometry'])]
+    projected_pts=np.array([ls.interpolate(ls.project(osm_pt)) for ls in list(local_contour_data['geometry'])])
+    distances=np.array([osm_pt.distance(projected_pt) for projected_pt in projected_pts])
+    argsort=np.argsort(distances)
+    elevations=elevations[argsort]
+    projected_pts=projected_pts[argsort]
+    distances=distances[argsort]
+
     if len(local_contour_data)<k_max:
-        return list(zip(projected_pts,elevations))
+        return list(zip(projected_pts,elevations,distances))
     else:
-        distances=[osm_pt.distance(projected_pt) for projected_pt in projected_pts]
-        argsort=np.argsort(distances)
-        return [(projected_pts[i],elevations[i]) for i in argsort[:k_max]]
+        return [(projected_pts[i],elevations[i],distances[i]) for i in range(k_max)]
 
 def select_affine_basis_for_data_frame(local_nodes_data,local_contour_data,k_max=3):
     L=list(zip(*local_nodes_data['geometry'].apply(lambda osm_pt:select_affine_basis_for_point(osm_pt,local_contour_data,k_max=k_max))))
     for i,l in enumerate(L):
-        pts,elev=zip(*l)
-        local_nodes_data['point_%i'%i]=pts
-        local_nodes_data['elevation_%i'%i]=elev
+        points,elevations,distances=zip(*l)
+        local_nodes_data['point_%i'%i]=points
+        local_nodes_data['elevation_%i'%i]=elevations
+        local_nodes_data['distance_%i'%i]=distances
     return local_nodes_data
 
 
