@@ -171,6 +171,8 @@ def decreasing_depth_intersections(osm_edges_df,osm_crs,G,cursor,max_depth,min_d
         contours_df['depth']=contours_df['id'].apply(lambda node:G.nodes()[node]['depth'])
         contours_df=contours_df.to_crs(osm_crs)
         local_intersection=gpd.overlay(contours_df,osm_edges_df,keep_geom_type=False).explode(index_parts=False)
+        if len(local_intersection)>0:
+            local_intersection['edge_coordinate']=local_intersection.apply(lambda row:osm_edges_df.loc[row['id_edge']]['geometry'].project(row['geometry']),axis=1)
         if intersection is None:
             intersection=local_intersection
             current_osm_edges=set(local_intersection['edge'])
@@ -182,7 +184,7 @@ def decreasing_depth_intersections(osm_edges_df,osm_crs,G,cursor,max_depth,min_d
         if len(terminated_edges)>0:
             osm_edges_df=osm_edges_df[~osm_edges_df['edge'].apply(lambda edge: edge in terminated_edges)]
         t3=time.time()
-        print('%i<depth<=%i :%f'%(depth-depth_step,depth,t3-t2))
+        print('%i<depth<=%i :%f '%(depth-depth_step,depth,t3-t2))
         if max_delta_time_total is not None and (t3-t1)>max_delta_time_total:
             break
         if max_delta_time_per_step is not None and (t3-t2)>max_delta_time_per_step:
