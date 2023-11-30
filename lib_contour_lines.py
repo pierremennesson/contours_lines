@@ -191,6 +191,27 @@ def decreasing_depth_intersections(osm_edges_df,osm_crs,G,cursor,max_depth,min_d
             break
     return intersection,depth-depth_step+1
 
+#OSM NODES ELEVATION COMPUTATION
+
+def select_affine_basis_for_point(osm_pt,local_contour_data,k_max=3):
+    elevations=np.array(local_contour_data['elevation'])
+    projected_pts=[ls.interpolate(ls.project(osm_pt)) for ls in list(local_contour_data['geometry'])]
+    if len(local_contour_data)<k_max:
+        return list(zip(projected_pts,elevations))
+    else:
+        distances=[osm_pt.distance(projected_pt) for projected_pt in projected_pts]
+        argsort=np.argsort(distances)
+        return [(projected_pts[i],elevations[i]) for i in argsort[:k_max]]
+
+def select_affine_basis_for_data_frame(local_nodes_data,local_contour_data,k_max=3):
+    L=list(zip(*local_nodes_data['geometry'].apply(lambda osm_pt:select_affine_basis_for_point(osm_pt,local_contour_data,k_max=k_max))))
+    for i,l in enumerate(L):
+        pts,elev=zip(*l)
+        local_nodes_data['point_%i'%i]=pts
+        local_nodes_data['elevation_%i'%i]=elev
+    return local_nodes_data
+
+
 #MERGE LINES
 
 def build_open_contour_graph(level_open_contours_df,max_distance=1000,coeff_restriction=0.1,MLS=None):
