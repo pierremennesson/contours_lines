@@ -201,16 +201,18 @@ def get_osm_node_elevation(osm_pt,local_contour_data,min_number_points=3):
 
     elevations=elevations[argsort]
     distances=distances[argsort]
-
     indexes_elevation_gaps=np.where(np.diff(elevations)!=0)[0]
+    
     if len(indexes_elevation_gaps)>0:
         k=indexes_elevation_gaps[0]+2
         #####
         k=max(min_number_points,k)
         #####
         elevations=elevations[:k]
-        distances=elevations[:k]
-        return np.sum(elevations*distances)/np.sum(distances)
+        distances=distances[:k]
+
+        return (elevations[0]+distances[0]*np.sum(elevations[1:]/distances[1:]))/(1.+distances[0]*np.sum(1./distances[1:]))
+
 
 
 
