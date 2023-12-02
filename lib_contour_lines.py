@@ -7,6 +7,7 @@ from itertools import combinations
 from shapely.geometry import LineString,Polygon
 from shapely.wkt import loads
 import time
+from scipy.optimize import minimize
 
         
 #OSM GRAPH CORRECTION
@@ -214,7 +215,26 @@ def get_osm_node_elevation(osm_pt,local_contour_data,min_number_points=3):
         return (elevations[0]+distances[0]*np.sum(elevations[1:]/distances[1:]))/(1.+distances[0]*np.sum(1./distances[1:]))
 
 
+def estimate_elevations_from_laplacian(sub_G_osm,verbose=False):
+    nodes=list(sub_G_osm.nodes())
+    variable_indexes=[k for k,node in enumerate(nodes) if not(isinstance(node,tuple))]
+    constant_indexes=[k for k,node in enumerate(nodes) if isinstance(node,tuple)]
+    elevations=[sub_G_osm.nodes()[nodes[k]]['elevation'] for k in constant_indexes]
+    print(set(elevations))
+    L=nx.laplacian_matrix(sub_G_osm,weight='length').toarray()
+    A=np.array([[L[i,j] for j in variable_indexes] for i in variable_indexes])
+    B=np.array([2*np.sum([L[i,constant_indexes[k]]*elevation for k,elevation in enumerate(elevations)]) for i in variable_indexes])
 
+    K=np.linalg.norm(B)
+    A/=K
+    B/=K
+
+    fun=lambda X:np.sum(X*np.matmul(A,X))+np.sum(B*X)
+    x0=np.mean(elevations)*np.ones(len(variable_indexes))
+    res=minimize(fun,x0)
+    if verbose:
+        print(res.message)
+    return res.x
 
 #MERGE LINES
 
