@@ -91,15 +91,15 @@ def add_contour_lines_to_database(df,cursor,source=None,is_closed=None,contours_
 
 #BUILD GRAPH
 
-def build_graph(cursor,contours_lines_table_name="contours_lines",tree_edges_table_name="tree_edges",with_distance=None):
+def build_graph(cursor,contours_lines_table_name="contours_lines",contours_edges_table_name="contours_edges",with_distance=None):
     G=nx.DiGraph()
     if with_distance is not None:
         if with_distance:
-            cmd="SELECT * FROM %s WHERE distance IS NOT NULL"%tree_edges_table_name
+            cmd="SELECT * FROM %s WHERE distance IS NOT NULL"%contours_edges_table_name
         else:
-            cmd="SELECT * FROM %s WHERE distance IS NULL"%tree_edges_table_name
+            cmd="SELECT * FROM %s WHERE distance IS NULL"%contours_edges_table_name
     else:
-        cmd="SELECT * FROM %s"%tree_edges_table_name
+        cmd="SELECT * FROM %s"%contours_edges_table_name
     cursor.execute(cmd)
     if with_distance is not None and with_distance:
         G.add_edges_from([(elem['begin'],elem['end'],{'distance':elem['distance']}) for elem in cursor.fetchall()])
@@ -159,17 +159,15 @@ def get_nodes_data(cursor,nodes,contours_lines_table_name="contours_lines"):
 
 #DEPTH SEARCH
 
-def decreasing_depth_intersections(osm_edges_df,osm_crs,G,cursor,max_depth,min_depth=0,depth_step=10,max_delta_time_per_level=None,max_delta_time_total=600.):
+def decreasing_depth_intersections(osm_edges_df,osm_crs,G_contours,cursor,max_depth,min_depth=0,depth_step=10):
     t1=time.time()
-    max_delta_time_per_step=None
-    if max_delta_time_per_level is not None:
-        max_delta_time_per_step=max_delta_time_per_level*depth_step
+
     intersection,current_osm_edges=None,None
     for depth in range(max_depth,min_depth,-depth_step):
         t2=time.time()
-        contour_nodes=[node for node,data in G.nodes(data=True) if depth-depth_step<data['depth']<=depth]
+        contour_nodes=[node for node,data in G_contours.nodes(data=True) if depth-depth_step<data['depth']<=depth]
         contours_df=get_nodes_data(cursor,contour_nodes)
-        contours_df['depth']=contours_df['id'].apply(lambda node:G.nodes()[node]['depth'])
+        contours_df['depth']=contours_df['id'].apply(lambda node:G_contours.nodes()[node]['depth'])
         contours_df=contours_df.to_crs(osm_crs)
         local_intersection=gpd.overlay(contours_df,osm_edges_df,keep_geom_type=False).explode(index_parts=False)
         if len(local_intersection)>0:
@@ -186,11 +184,44 @@ def decreasing_depth_intersections(osm_edges_df,osm_crs,G,cursor,max_depth,min_d
             osm_edges_df=osm_edges_df[~osm_edges_df['edge'].apply(lambda edge: edge in terminated_edges)]
         t3=time.time()
         print('%i<depth<=%i :%f '%(depth-depth_step,depth,t3-t2))
-        if max_delta_time_total is not None and (t3-t1)>max_delta_time_total:
-            break
-        if max_delta_time_per_step is not None and (t3-t2)>max_delta_time_per_step:
-            break
-    return intersection,depth-depth_step+1
+
+    return intersection
+
+
+def increasing_elevations_intersections(osm_edges_df,osm_crs,cursor,contours_lines_table_name="contours_lines",elevation_step=10,elevation_cut=10.):
+    t1=time.time()
+    cmd="SELECT DISTINCT elevation FROM %s ORDER BY elevation"%contours_lines_table_name
+    cmd=cursor.execute(cmd)
+    elevations=np.array([elem['elevation'] for elem in cursor.fetchall()])
+
+    intersection,current_osm_edges=None,None
+    for i in range(0,len(elevations)-elevation_step,elevation_step):
+        t2=time.time()
+        min_elevation,max_elevation=elevations[i],elevations[i+elevation_step]
+        cmd="SELECT id FROM %s WHERE is_closed AND elevation>=%f AND elevation<%i"%(contours_lines_table_name,min_elevation,max_elevation)
+        cursor.execute(cmd)
+        contour_nodes=[elem['id'] for elem in cursor.fetchall()]
+        contours_df=get_nodes_data(cursor,contour_nodes)
+        contours_df=contours_df.to_crs(osm_crs)
+        local_intersection=gpd.overlay(contours_df,osm_edges_df,keep_geom_type=False).explode(index_parts=False)
+        if len(local_intersection)>0:
+            local_intersection['edge_coordinate']=local_intersection.apply(lambda row:osm_edges_df.loc[row['id_edge']]['geometry'].project(row['geometry']),axis=1)
+        if intersection is None:
+            intersection=local_intersection
+            current_osm_edges=set(local_intersection['edge'])
+        else:
+            intersection=pd.concat([intersection,local_intersection],ignore_index=True)
+            current_osm_edges=current_osm_edges.union(set(local_intersection['edge']))
+
+
+
+        terminated_edges=current_osm_edges.difference(local_intersection[local_intersection.elevation>=max_elevation-elevation_cut]['edge'])
+        if len(terminated_edges)>0:
+             osm_edges_df=osm_edges_df[~osm_edges_df['edge'].apply(lambda edge: edge in terminated_edges)]
+        t3=time.time()
+        print('%f<=elevation<%f :%f '%(min_elevation,max_elevation,t3-t2))
+    return intersection
+
 
 #OSM NODES ELEVATION COMPUTATION
 
@@ -215,26 +246,54 @@ def get_osm_node_elevation(osm_pt,local_contour_data,min_number_points=3):
         return (elevations[0]+distances[0]*np.sum(elevations[1:]/distances[1:]))/(1.+distances[0]*np.sum(1./distances[1:]))
 
 
-def estimate_elevations_from_laplacian(sub_G_osm,verbose=False):
+def estimate_elevations_from_laplacian(sub_G_osm):
     nodes=list(sub_G_osm.nodes())
     variable_indexes=[k for k,node in enumerate(nodes) if not(isinstance(node,tuple))]
     constant_indexes=[k for k,node in enumerate(nodes) if isinstance(node,tuple)]
     elevations=[sub_G_osm.nodes()[nodes[k]]['elevation'] for k in constant_indexes]
-    print(set(elevations))
-    L=nx.laplacian_matrix(sub_G_osm,weight='length').toarray()
-    A=np.array([[L[i,j] for j in variable_indexes] for i in variable_indexes])
-    B=np.array([2*np.sum([L[i,constant_indexes[k]]*elevation for k,elevation in enumerate(elevations)]) for i in variable_indexes])
+    if len(set(elevations))>1:
+        L=nx.laplacian_matrix(sub_G_osm,weight='length').toarray()
+        A=np.array([[L[i,j] for j in variable_indexes] for i in variable_indexes])
+        B=np.array([2*np.sum([L[i,constant_indexes[k]]*elevation for k,elevation in enumerate(elevations)]) for i in variable_indexes])
 
-    K=np.linalg.norm(B)
-    A/=K
-    B/=K
+        K=np.linalg.norm(B)
+        A/=K
+        B/=K
 
-    fun=lambda X:np.sum(X*np.matmul(A,X))+np.sum(B*X)
-    x0=np.mean(elevations)*np.ones(len(variable_indexes))
-    res=minimize(fun,x0)
-    if verbose:
-        print(res.message)
-    return res.x
+        fun=lambda X:np.sum(X*np.matmul(A,X))+np.sum(B*X)
+        x0=np.mean(elevations)*np.ones(len(variable_indexes))
+        res=minimize(fun,x0)
+        if res.success:
+            return [nodes[k] for k in variable_indexes],res.x
+        else:
+            print(res.message)
+    else:
+        print('only one available elevation')
+
+
+def estimate_elevations_minimizing_edges(sub_G_osm):
+    nodes=list(sub_G_osm.nodes())
+    variable_indexes=[k for k,node in enumerate(nodes) if not(isinstance(node,tuple))]
+    constant_indexes=[k for k,node in enumerate(nodes) if isinstance(node,tuple)]
+    elevations=[sub_G_osm.nodes()[nodes[k]]['elevation'] for k in constant_indexes]
+    if len(set(elevations))>1:
+        L=nx.laplacian_matrix(sub_G_osm,weight='length').toarray()
+        A=np.array([[L[i,j] for j in variable_indexes] for i in variable_indexes])
+        B=np.array([2*np.sum([L[i,constant_indexes[k]]*elevation for k,elevation in enumerate(elevations)]) for i in variable_indexes])
+
+        K=np.linalg.norm(B)
+        A/=K
+        B/=K
+
+        fun=lambda X:np.sum(X*np.matmul(A,X))+np.sum(B*X)
+        x0=np.mean(elevations)*np.ones(len(variable_indexes))
+        res=minimize(fun,x0)
+        if res.success:
+            return [nodes[k] for k in variable_indexes],res.x
+        else:
+            print(res.message)
+    else:
+        print('only one available elevation')
 
 #MERGE LINES
 
