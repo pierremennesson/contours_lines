@@ -248,11 +248,12 @@ def get_osm_node_elevation(osm_pt,local_contour_data,min_number_points=3):
 
 def estimate_elevations_from_laplacian(sub_G_osm):
     nodes=list(sub_G_osm.nodes())
+    nx.set_edge_attributes(sub_G_osm,{(u,v,k):{'inverse_distance':1./d['length']} for u,v,k,d in sub_G_osm.edges(data=True,keys=True)})
     variable_indexes=[k for k,node in enumerate(nodes) if not(isinstance(node,tuple))]
     constant_indexes=[k for k,node in enumerate(nodes) if isinstance(node,tuple)]
     elevations=[sub_G_osm.nodes()[nodes[k]]['elevation'] for k in constant_indexes]
     if len(set(elevations))>1:
-        L=nx.laplacian_matrix(sub_G_osm,weight='length').toarray()
+        L=nx.laplacian_matrix(sub_G_osm,weight='inverse_distance').toarray()
         A=np.array([[L[i,j] for j in variable_indexes] for i in variable_indexes])
         B=np.array([2*np.sum([L[i,constant_indexes[k]]*elevation for k,elevation in enumerate(elevations)]) for i in variable_indexes])
 
@@ -271,29 +272,7 @@ def estimate_elevations_from_laplacian(sub_G_osm):
         print('only one available elevation')
 
 
-def estimate_elevations_minimizing_edges(sub_G_osm):
-    nodes=list(sub_G_osm.nodes())
-    variable_indexes=[k for k,node in enumerate(nodes) if not(isinstance(node,tuple))]
-    constant_indexes=[k for k,node in enumerate(nodes) if isinstance(node,tuple)]
-    elevations=[sub_G_osm.nodes()[nodes[k]]['elevation'] for k in constant_indexes]
-    if len(set(elevations))>1:
-        L=nx.laplacian_matrix(sub_G_osm,weight='length').toarray()
-        A=np.array([[L[i,j] for j in variable_indexes] for i in variable_indexes])
-        B=np.array([2*np.sum([L[i,constant_indexes[k]]*elevation for k,elevation in enumerate(elevations)]) for i in variable_indexes])
 
-        K=np.linalg.norm(B)
-        A/=K
-        B/=K
-
-        fun=lambda X:np.sum(X*np.matmul(A,X))+np.sum(B*X)
-        x0=np.mean(elevations)*np.ones(len(variable_indexes))
-        res=minimize(fun,x0)
-        if res.success:
-            return [nodes[k] for k in variable_indexes],res.x
-        else:
-            print(res.message)
-    else:
-        print('only one available elevation')
 
 #MERGE LINES
 
