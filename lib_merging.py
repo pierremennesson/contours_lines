@@ -8,6 +8,25 @@ from shapely.geometry import LineString,MultiLineString
         
 
 def build_open_contour_graph(level_open_contours_df,max_distance=1.,coeff_restriction=0.1):
+    """This functions builds a graph whith open contours lines extremities as nodes. 
+    Edges are either the ones induced by the contours lines or are joining close (i.e. with distance < max_distance) 
+    extremities from distinct contours 
+
+
+    Parameters
+    ----------
+    level_open_contours_df : a geodataframe containing open contour lines
+
+    max_distance : maximum distance for two extremities from different contours lines to be merged
+
+    coeff_restriction : linestring between two extremities are contracted by (1-coeff_restriction) 
+                        for cleaning purposes (see clean_graph)
+
+
+    Returns
+    -------
+    G_extremities : the open contours graph
+    """
     G_extremities=nx.Graph()
     for index,row in level_open_contours_df.iterrows():
         ls=row['geometry']
@@ -34,6 +53,14 @@ def build_open_contour_graph(level_open_contours_df,max_distance=1.,coeff_restri
     
 
 def clean_graph(G_extremities):
+    """This functions removes 
+       intersecting join edges
+
+    Parameters
+    ----------
+    G_extremities : the open contours graph
+
+    """
     bad_edges,edges=[],G_extremities.edges(data=True)
     geoms_join=gpd.GeoDataFrame([{'edge':(u,v),'first':u,'end':v,'geometry':d['geometry'],'distance':d['distance']} for u,v,d in edges if d['edge_type']=='join'])
     intersection=gpd.overlay(geoms_join,geoms_join,keep_geom_type=False)
@@ -46,6 +73,14 @@ def clean_graph(G_extremities):
     G_extremities.remove_edges_from(bad_edges)
 
 def remove_branch(G_extremities):
+    """This functions removes edges 
+       to get a union of cycle and chains
+
+    Parameters
+    ----------
+    G_extremities : the open contours graph
+
+    """
     bad_edges=[]
     for node,deg in G_extremities.degree():
         if deg>2:
@@ -55,6 +90,24 @@ def remove_branch(G_extremities):
     G_extremities.remove_edges_from(bad_edges)
 
 def cycle_chain_decomposition(G_extremities):
+    """This functions extracts the cycles and 
+       the chains from the open contours graph
+       which correspond to contours lines that
+       will be merged to produce a new longer 
+       one, either closed or open.
+
+
+    Parameters
+    ----------
+    G_extremities : the open contours graph
+
+
+    Returns
+    -------
+    cycles : the graph cycles
+
+    chains : the graph chains
+    """
     cycles,chains=[],[]
     for cc in nx.connected_components(G_extremities):
         if len(cc)>0:
@@ -76,6 +129,22 @@ def cycle_chain_decomposition(G_extremities):
 
 
 def get_contour_lines_from_elevation_df(level_open_contours_df,max_distance=1):
+    """This functions merges open contours lines to produce new ones either open
+       or closed.
+
+
+    Parameters
+    ----------
+    level_open_contours_df : a geodataframe containing open contour lines
+
+    max_distance : maximum distance for two extremities from different contours lines to be merged
+
+    Returns
+    -------
+    closed_contour_lines : a geodataframe containing closed merged contours lines
+
+    open_contour_lines : a geodataframe containing open merged contours lines
+    """
     G_extremities=build_open_contour_graph(level_open_contours_df,max_distance=max_distance)
     clean_graph(G_extremities)
     remove_branch(G_extremities)
