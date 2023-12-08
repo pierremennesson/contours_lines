@@ -499,7 +499,7 @@ class DataBaseManager:
         true_osm_nodes=tuple(G_osm_cut.nodes())
         k=0
 
-        cmd="SELECT osm_begin,osm_end,osm_key,edge_coordinate,elevation,ST_asText(geometry) AS geometry FROM %s WHERE osm_begin IN %s"%(self.intersections_table_name,str(true_osm_nodes))
+        cmd="SELECT osm_begin,osm_end,osm_key,edge_coordinate,elevation,contour_id,ST_asText(geometry) AS geometry FROM %s WHERE osm_begin IN %s"%(self.intersections_table_name,str(true_osm_nodes))
         self.execute(cmd)
         intersection=pd.DataFrame(self.cursor.fetchall())
         intersection['geometry']=intersection['geometry'].apply(lambda pt:loads(pt))
@@ -507,8 +507,8 @@ class DataBaseManager:
         for (osm_begin,osm_end,osm_key),df in intersection.groupby(['osm_begin','osm_end','osm_key']):
             df=df.sort_values('edge_coordinate')
             row=df.iloc[0]
-            neighbor_pt,neighbor_elevation,length=row['geometry'],row['elevation'],row['edge_coordinate']
-            G_osm_cut.add_node((osm_begin,k),x=neighbor_pt.x,y=neighbor_pt.y,elevation=neighbor_elevation)
+            neighbor_pt,neighbor_elevation,length,contour_id=row['geometry'],row['elevation'],row['edge_coordinate'],row['contour_id']
+            G_osm_cut.add_node((osm_begin,k),x=neighbor_pt.x,y=neighbor_pt.y,elevation=neighbor_elevation,contour_id=contour_id)
             G_osm_cut.add_edge(osm_begin,(osm_begin,k),length=length)
             k+=1
 
@@ -516,16 +516,17 @@ class DataBaseManager:
         self.execute(cmd)
         lengths={(elem['osm_begin'],elem['osm_end'],elem['osm_key']):elem['length'] for elem in self.cursor.fetchall()}
 
-        cmd="SELECT osm_begin,osm_end,osm_key,edge_coordinate,elevation,ST_asText(geometry) AS geometry FROM %s WHERE (osm_begin,osm_end,osm_key) IN %s"%(self.intersections_table_name,str(tuple(lengths.keys())))
+        cmd="SELECT osm_begin,osm_end,osm_key,edge_coordinate,elevation,contour_id,ST_asText(geometry) AS geometry FROM %s WHERE (osm_begin,osm_end,osm_key) IN %s"%(self.intersections_table_name,str(tuple(lengths.keys())))
         self.execute(cmd)
         intersection=pd.DataFrame(self.cursor.fetchall())
         intersection['geometry']=intersection['geometry'].apply(lambda pt:loads(pt))
 
+
         for (osm_begin,osm_end,osm_key),df in intersection.groupby(['osm_begin','osm_end','osm_key']):
             df=df.sort_values('edge_coordinate')
             row=df.iloc[-1]
-            neighbor_pt,neighbor_elevation,length=row['geometry'],row['elevation'],lengths[(osm_begin,osm_end,osm_key)]-row['edge_coordinate']
-            G_osm_cut.add_node((osm_end,k),x=neighbor_pt.x,y=neighbor_pt.y,elevation=neighbor_elevation)
+            neighbor_pt,neighbor_elevation,length,contour_id=row['geometry'],row['elevation'],lengths[(osm_begin,osm_end,osm_key)]-row['edge_coordinate'],row['contour_id']
+            G_osm_cut.add_node((osm_end,k),x=neighbor_pt.x,y=neighbor_pt.y,elevation=neighbor_elevation,contour_id=contour_id)
             G_osm_cut.add_edge((osm_end,k),osm_end,length=length)
             k+=1
 
@@ -812,6 +813,8 @@ def estimate_elevations_from_laplacian(sub_G_osm):
             return [nodes[k] for k in variable_indexes],res.x
         else:
             print(res.message)
+    else:
+        print('only one elevation %f'%elevations[0])
 
 
 #OSM GRAPH CORRECTION

@@ -73,8 +73,11 @@ if __name__ == "__main__":
 	G_osm_cut=DBM.build_cut_osm_graph()
 	DBM.complete_osm_graph(G_osm_cut)
 	DBM.add_nodes_elevations_to_database(G_osm_cut)
+
 	t7=time.time()
 	print('computing nodes elvations took %f'%(t7-t6))
 	print('total %f'%(t7-t1))
+    DBM.cursor.close()
+    DBM.cnx.close()
 
 
