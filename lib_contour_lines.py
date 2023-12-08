@@ -11,6 +11,8 @@ from scipy.optimize import minimize
 from lib_merging import get_contour_lines_from_elevation_df
 import osmnx as ox
 import mysql.connector
+from multiprocessing import Pool,cpu_count
+
 
 
         
@@ -45,23 +47,24 @@ class DataBaseManager:
         intersections_table_name="intersections"):
 
 
-        cnx = mysql.connector.connect(user=user, 
-                                  password=password,
-                                  host=host,
-                                  database=database,
+        self.user=user
+        self.password=password
+        self.host=host
+        self.database=database
+        self.cnx = mysql.connector.connect(user=self.user, 
+                                  password=self.password,
+                                  host=self.host,
+                                  database=self.database,
                                   autocommit=True)
 
-        self.cnx=cnx
-        self.cursor = cnx.cursor(buffered=True,dictionary=True)
+        self.cursor = self.cnx.cursor(buffered=True,dictionary=True)
         self.contours_lines_table_name = contours_lines_table_name
         self.osm_nodes_table_name = osm_nodes_table_name 
         self.osm_edges_table_name = osm_edges_table_name 
         self.intersections_table_name = intersections_table_name 
+        self.config_connexion()
 
-
-#UPDATE BUFFER
-
-    def update_buffer(self):
+    def config_connexion(self):
         """ update mysql global variables
             to execute insert queries with
             a lot of rows
@@ -72,6 +75,51 @@ class DataBaseManager:
         cmd="SET GLOBAL MAX_ALLOWED_PACKET=1000000000;"
         self.cursor.execute(cmd)
 
+
+    def reconnect(self,max_nb_try=100):
+        """reconnect to database
+
+        Parameters
+        ----------
+        max_nb_try : number of reconnexion trials
+
+
+        """
+        self.cursor.close()
+        self.cnx.close()
+        error,nb_try=True,0
+        while(error and nb_try<max_nb_try):
+            try:
+                self.cnx = mysql.connector.connect(user=self.user, 
+                                          password=self.password,
+                                          host=self.host,
+                                          database=self.database,
+                                          autocommit=True)
+
+                self.cursor = self.cnx.cursor(buffered=True,dictionary=True)
+                self.config_connexion()
+                print('reconnected !')
+                error=False
+            except Exception as e:
+                nb_try+=1
+                print(nb_try)
+                time.sleep(5.)
+
+
+
+    def execute(self,cmd):
+        """execute mysql command
+
+        Parameters
+        ----------
+        cmd : mysql command
+
+        """
+        try:
+            self.cursor.execute(cmd)
+        except Exception as e:
+            self.reconnect()
+            self.cursor.execute(cmd)
 
 #BUILD TABLES
 
@@ -92,7 +140,7 @@ class DataBaseManager:
               )
               ENGINE=InnoDB;
             """%self.contours_lines_table_name
-        self.cursor.execute(cmd)
+        self.execute(cmd)
 
 
     def create_tables_v2(self):
@@ -111,7 +159,7 @@ class DataBaseManager:
         );
             """%self.osm_nodes_table_name
         
-        self.cursor.execute(cmd)
+        self.execute(cmd)
 
         cmd="""CREATE TABLE `%s`(
         `osm_begin` BIGINT NOT NULL,
@@ -128,7 +176,7 @@ class DataBaseManager:
         );
             """%(self.osm_edges_table_name,self.osm_nodes_table_name,self.osm_nodes_table_name)
         
-        self.cursor.execute(cmd)
+        self.execute(cmd)
 
         
         cmd="""CREATE TABLE `%s`(
@@ -149,7 +197,7 @@ class DataBaseManager:
               )
               ENGINE=InnoDB;
             """%(self.intersections_table_name,self.contours_lines_table_name,self.osm_edges_table_name)
-        self.cursor.execute(cmd)
+        self.execute(cmd)
         
 
     def delete_tables(self,table_names=None):
@@ -160,12 +208,12 @@ class DataBaseManager:
             table_names=[self.intersections_table_name,self.osm_edges_table_name,self.osm_nodes_table_name,self.contours_lines_table_name]
         for table_name in table_names:
             cmd="DROP TABLE IF EXISTS %s"%table_name
-            self.cursor.execute(cmd)
+            self.execute(cmd)
             
     #ADD TO DATABASE
 
     #assume geometry is in some utm crs
-    def add_contour_lines_to_database_from_df(self,df,source=None,is_closed=None):
+    def add_contour_lines_to_database_from_df(self,df,source=None,is_closed=None,nb_inserts=100,verbose=True):
         """add contours lines from a geodataframe to database
 
         Parameters
@@ -178,11 +226,12 @@ class DataBaseManager:
         closed or open, the contours lines will be automatically stored with boolean attributes
         is_closed. If not provided, this feature is computed. 
 
+        verbose : boolean, whether to or not to print intermediate times (for optimization purpose)
 
         """
 
-        self.update_buffer()
-
+        # self.update_buffer()
+        t1=time.time()
         if is_closed is not None:
             df['is_closed']=is_closed
         else:
@@ -190,13 +239,19 @@ class DataBaseManager:
         df['length']=df['geometry'].apply(lambda ls:ls.length)
         df['number_points']=df['geometry'].apply(lambda ls:len(ls.coords))
         df=df.to_crs('epsg:4326')
+        t2=time.time()
+        if verbose:
+            print('preprocess df took %f'%(t2-t1))
         if source is None:
             string_list=',\n'.join(['(%s,%f,%f,%f,ST_GeomFromText(\'%s\'))'%(str(row['is_closed']).upper(),row['elevation'],row['length'],row['number_points'],row['geometry'].wkt)  for _,row in df.iterrows()])
             cmd="""INSERT INTO %s (`is_closed`,`elevation`,`length`,`number_points`,`geometry`) VALUES %s;"""%(self.contours_lines_table_name,string_list)
         else:
             string_list=',\n'.join(['(%i,%s,%f,%f,%f,ST_GeomFromText(\'%s\'))'%(source,str(row['is_closed']).upper(),row['elevation'],row['length'],row['number_points'],row['geometry'].wkt)  for _,row in df.iterrows()])
             cmd="""INSERT INTO %s (`source`,`is_closed`,`elevation`,`length`,`number_points`,`geometry`) VALUES %s;"""%(self.contours_lines_table_name,string_list)
-        self.cursor.execute(cmd)
+        self.execute(cmd)
+        t3=time.time()
+        if verbose:
+            print('inserting %i rows took %f'%(len(df),t3-t2))
             
 
     def add_contour_lines_to_database(self,file_paths,elevation_column="ALTITUDE"):
@@ -212,27 +267,14 @@ class DataBaseManager:
 
         """
         for k,file_path in enumerate(file_paths):
-            if (k+1)%5==0:
-                print('file  %i/%i'%(k+1,len(file_paths)))
+            print('file  %i/%i'%(k+1,len(file_paths)))
+            t1=time.time()
             df=gpd.read_file(file_path) 
+            t2=time.time()
             df['elevation']=df[elevation_column]
+            print('reading file took %s'%(t2-t1))
             self.add_contour_lines_to_database_from_df(df,source=k)
-            t3=time.time()
-            cmd="""SELECT c1.id AS id_1,ST_asText(c1.geometry) AS geometry_1,c2.id AS id_2,ST_asText(c2.geometry) AS geometry_2 FROM
-            (SELECT * FROM %s WHERE source!=%i) AS c1
-            JOIN (SELECT * FROM %s WHERE source=%i) AS c2
-            ON c1.elevation=c2.elevation AND c1.length=c2.length
-            
-            ;
-            
-            """%(self.contours_lines_table_name,k,self.contours_lines_table_name,k)
-            self.cursor.execute(cmd)
-            L=self.cursor.fetchall()
-            bad_ids=[elem['id_2'] for elem in L if loads(elem['geometry_1'])==loads(elem['geometry_2'])]
-            if len(bad_ids)>0:
-                bad_ids_string='(%s)'%', '.join([str(bad_id) for bad_id in bad_ids])
-                cmd="DELETE FROM %s WHERE id IN %s"%(self.contours_lines_table_name,bad_ids_string)
-                self.cursor.execute(cmd)
+
 
 
             
@@ -253,9 +295,9 @@ class DataBaseManager:
 
         """
         if elevations is None:
-            self.update_buffer()
+            # self.update_buffer()
             cmd="SELECT DISTINCT elevation FROM %s ORDER BY elevation"%self.contours_lines_table_name
-            cmd=self.cursor.execute(cmd)
+            self.execute(cmd)
             elevations=np.array([elem['elevation'] for elem in self.cursor.fetchall()])
         for k,level in enumerate(elevations):
             if (k+1)%10==0:
@@ -268,21 +310,21 @@ class DataBaseManager:
                 if len(closed_merged_contours_lines)>0:
                     closed_merged_contours_df=gpd.GeoDataFrame([{'geometry':ls} for ls in closed_merged_contours_lines],geometry='geometry',crs=crs)
                     closed_merged_contours_df['elevation']=level 
-                    self.add_contour_lines_to_database_from_df(closed_merged_contours_df,is_closed=True)
+                    self.add_contour_lines_to_database_from_df(closed_merged_contours_df,is_closed=True,verbose=False)
                 if len(open_merged_contour_lines)>0:
                     open_merged_contours_df=gpd.GeoDataFrame([{'geometry':ls} for ls in open_merged_contour_lines],geometry='geometry',crs=crs)
                     open_merged_contours_df['elevation']=level 
-                    self.add_contour_lines_to_database_from_df(open_merged_contours_df,is_closed=False)
+                    self.add_contour_lines_to_database_from_df(open_merged_contours_df,is_closed=False,verbose=False)
                 if len(merged_nodes)>0:
                     merge_nodes_string='(%s)'%', '.join([str(merge_node) for merge_node in merged_nodes])
                     cmd="DELETE FROM %s WHERE id IN %s"%(self.contours_lines_table_name,merge_nodes_string)
-                    self.cursor.execute(cmd)
+                    self.execute(cmd)
 
 
     #INTERSECTION
 
 
-    def increasing_elevations_intersections(self,osm_edges_df,osm_crs,elevation_step=10,elevation_cut=10.):
+    def increasing_elevations_intersections(self,osm_edges_df,osm_crs,elevation_step=10,elevation_cut=10.,drop_duplicates=False):
         """This functions recursively computes intersections between the contour_lines and the edges of some
         open street map graph. 
 
@@ -300,13 +342,15 @@ class DataBaseManager:
 
         elevation_cut : see update_local_intersection
 
+        drop_duplicates : see update_local_intersection
+
         Returns
         -------
         intersection : a geodataframe whose rows are points that correspond to intersections between contour lines and osm edges.
         """
         t1=time.time()
         cmd="SELECT DISTINCT elevation FROM %s ORDER BY elevation"%self.contours_lines_table_name
-        cmd=self.cursor.execute(cmd)
+        cmd=self.execute(cmd)
         elevations=np.array([elem['elevation'] for elem in self.cursor.fetchall()])
 
         intersection,current_osm_edges=None,None
@@ -314,13 +358,13 @@ class DataBaseManager:
             t2=time.time()
             min_elevation,max_elevation=elevations[i],elevations[i+elevation_step]
             cmd="SELECT id FROM %s WHERE elevation>=%f AND elevation<%i"%(self.contours_lines_table_name,min_elevation,max_elevation)
-            self.cursor.execute(cmd)
+            self.execute(cmd)
             contour_nodes=[elem['id'] for elem in self.cursor.fetchall()]
             contours_df=self.get_nodes_data(contour_nodes)
             contours_df=contours_df.rename(columns={'id':'contour_id'})
             contours_df=contours_df.to_crs(osm_crs)
             if len(osm_edges_df)>0:
-                intersection,osm_edges_df,current_osm_edges=update_local_intersection(intersection,current_osm_edges,contours_df,osm_edges_df,max_elevation,elevation_cut)
+                intersection,osm_edges_df,current_osm_edges=update_local_intersection(intersection,current_osm_edges,contours_df,osm_edges_df,max_elevation,elevation_cut,drop_duplicates=drop_duplicates)
                 t3=time.time()
                 print('%f<=elevation<%f :%f '%(min_elevation,max_elevation,t3-t2))
             else:
@@ -346,35 +390,35 @@ class DataBaseManager:
         G_osm : the osm graph, needed to store osm edges length in the database.
 
         """
-        self.update_buffer()
+        # self.update_buffer()
 
 
         osm_nodes_data=nx.edge_subgraph(G_osm,edges).nodes(data=True)
         
         string_list=',\n'.join(['(%i,ST_GeomFromText(\'%s\'))'%(node,Point(data['lon'],data['lat']).wkt) for node,data in osm_nodes_data])
         cmd="INSERT IGNORE INTO %s(osm_id,geometry) VALUES %s;"%(self.osm_nodes_table_name,string_list)
-        self.cursor.execute(cmd)
+        self.execute(cmd)
 
         intersecting_edges=intersection['edge'].unique()
         string_list=',\n'.join(['(%i,%i,%i,%f,TRUE)'%(edge[0],edge[1],edge[2],G_osm.get_edge_data(*edge)['length']) for edge in intersecting_edges])
         cmd="INSERT INTO %s(osm_begin,osm_end,osm_key,length,intersects) VALUES %s;"%(self.osm_edges_table_name,string_list)
-        self.cursor.execute(cmd)
+        self.execute(cmd)
 
         inside_edges=set(edges).difference(intersecting_edges)
 
         string_list=',\n'.join(['(%i,%i,%i,%f,False)'%(edge[0],edge[1],edge[2],G_osm.get_edge_data(*edge)['length']) for edge in inside_edges if edge[0]!=edge[1]])
         cmd="INSERT INTO %s(osm_begin,osm_end,osm_key,length,intersects) VALUES %s;"%(self.osm_edges_table_name,string_list)
-        self.cursor.execute(cmd)
+        self.execute(cmd)
 
 
 
         intersection=intersection.to_crs('epsg:4326')
         string_list=',\n'.join(['(%i,%i,%i,%f,%i,%f,ST_GeomFromText(\'%s\'))'%(row['edge'][0],row['edge'][1],row['edge'][2],row['edge_coordinate'],row['contour_id'],row['elevation'],row['geometry'].wkt)  for _,row in intersection.iterrows()])
         cmd="INSERT INTO %s (`osm_begin`,`osm_end`,`osm_key`,`edge_coordinate`,`contour_id`,`elevation`,`geometry`) VALUES %s;"%(self.intersections_table_name,string_list)
-        self.cursor.execute(cmd)
+        self.execute(cmd)
         
 
-    def compute_all_intersections(self,G_osm,osm_crs,n_bunch_edges=25000,elevation_step=10,elevation_cut=10.):
+    def compute_all_intersections(self,G_osm,osm_crs,n_bunch_edges=25000,elevation_step=10,elevation_cut=10.,drop_duplicates=False):
         """This functions recursively the contour_lines and the edges of some open street map graph and store
         them in the database. 
 
@@ -393,6 +437,7 @@ class DataBaseManager:
 
         elevation_cut : see update_local_intersection
 
+        drop_duplicates : see update_local_intersection
 
         """
         osm_edges_df=ox.graph_to_gdfs(G_osm,nodes=False,edges=True)
@@ -403,7 +448,7 @@ class DataBaseManager:
 
         for k in range(0,len(osm_edges_df),n_bunch_edges):
             sub_osm_edges_df=osm_edges_df.iloc[k:min(k+n_bunch_edges,len(osm_edges_df))]
-            intersection=self.increasing_elevations_intersections(sub_osm_edges_df,osm_crs,elevation_step=elevation_step,elevation_cut=elevation_cut)
+            intersection=self.increasing_elevations_intersections(sub_osm_edges_df,osm_crs,elevation_step=elevation_step,elevation_cut=elevation_cut,drop_duplicates=drop_duplicates)
             self.add_intersection_to_database(intersection,sub_osm_edges_df['edge'],G_osm)
 
 
@@ -429,10 +474,10 @@ class DataBaseManager:
         """
         G_osm_cut=nx.MultiGraph()
         cmd="SELECT osm_begin,osm_end,osm_key,length FROM %s WHERE NOT intersects"%self.osm_edges_table_name
-        self.cursor.execute(cmd)
+        self.execute(cmd)
         G_osm_cut.add_edges_from([(elem['osm_begin'],elem['osm_end'],elem['osm_key'],{'length':elem['length']}) for elem in self.cursor.fetchall()])
         cmd="SELECT osm_id,ST_asText(geometry) AS geometry FROM %s WHERE osm_id IN %s"%(self.osm_nodes_table_name,str(tuple(G_osm_cut.nodes())))
-        self.cursor.execute(cmd)
+        self.execute(cmd)
         data={elem['osm_id']:{'geometry':loads(elem['geometry'])} for elem in self.cursor.fetchall()}
         nx.set_node_attributes(G_osm_cut,{node:{'x':datum['geometry'].x,'y':datum['geometry'].y} for node,datum in data.items()})
         return G_osm_cut
@@ -455,7 +500,7 @@ class DataBaseManager:
         k=0
 
         cmd="SELECT osm_begin,osm_end,osm_key,edge_coordinate,elevation,ST_asText(geometry) AS geometry FROM %s WHERE osm_begin IN %s"%(self.intersections_table_name,str(true_osm_nodes))
-        self.cursor.execute(cmd)
+        self.execute(cmd)
         intersection=pd.DataFrame(self.cursor.fetchall())
         intersection['geometry']=intersection['geometry'].apply(lambda pt:loads(pt))
 
@@ -468,11 +513,11 @@ class DataBaseManager:
             k+=1
 
         cmd="SELECT osm_begin,osm_end,osm_key,length FROM %s WHERE osm_end IN %s"%(self.osm_edges_table_name,str(true_osm_nodes))
-        self.cursor.execute(cmd)
+        self.execute(cmd)
         lengths={(elem['osm_begin'],elem['osm_end'],elem['osm_key']):elem['length'] for elem in self.cursor.fetchall()}
 
         cmd="SELECT osm_begin,osm_end,osm_key,edge_coordinate,elevation,ST_asText(geometry) AS geometry FROM %s WHERE (osm_begin,osm_end,osm_key) IN %s"%(self.intersections_table_name,str(tuple(lengths.keys())))
-        self.cursor.execute(cmd)
+        self.execute(cmd)
         intersection=pd.DataFrame(self.cursor.fetchall())
         intersection['geometry']=intersection['geometry'].apply(lambda pt:loads(pt))
 
@@ -495,7 +540,7 @@ class DataBaseManager:
         G_osm_cut : the osm cut graph
 
         """
-        self.update_buffer()
+#        self.update_buffer()
         for cc in nx.connected_components(nx.Graph(G_osm_cut)):
             sub_G_osm_cut=nx.subgraph(G_osm_cut,cc)
             output=estimate_elevations_from_laplacian(sub_G_osm_cut)
@@ -507,23 +552,47 @@ class DataBaseManager:
                 `elevation` FLOAT NOT NULL
             
                 );"""
-                self.cursor.execute(cmd)
+                self.execute(cmd)
             
                 cmd="INSERT INTO temp(`osm_id`,`elevation`) VALUES %s"%',\n'.join(['(%i,%f)'%(node,elevation) for node,elevation in zip(nodes,estimated_elevations)])
-                self.cursor.execute(cmd)
+                self.execute(cmd)
             
                 cmd=""" UPDATE %s JOIN temp
                 ON %s.osm_id=temp.osm_id
                 SET %s.elevation=temp.elevation
             
                 ;"""%(self.osm_nodes_table_name,self.osm_nodes_table_name,self.osm_nodes_table_name)
-                self.cursor.execute(cmd)
+                self.execute(cmd)
                 
                 cmd="DROP TABLE temp"
-                self.cursor.execute(cmd)
+                self.execute(cmd)
 
 
+    #CONTOUR LINES GRAPH INFERENCE
 
+
+    def build_contour_graph(self):
+        """This functions builds the
+        contours lines graph induced by
+        successive intersections
+        
+        Returns
+        -------
+        G_contours : the contours lines graph 
+        """
+        G_contours=nx.Graph()
+        cmd="SELECT osm_begin,osm_end,osm_key,edge_coordinate,contour_id,ST_asText(geometry) AS geometry FROM %s"%self.intersections_table_name
+        self.execute(cmd)
+        df=pd.DataFrame(self.cursor.fetchall())
+        df['geometry']=df['geometry'].apply(lambda pt:loads(pt))
+        df['edge']=df.apply(lambda row:(row['osm_begin'],row['osm_end'],row['osm_key']),axis=1)
+        for _,sub_df in df.groupby('edge'):
+            sub_df=sub_df.sort_values('edge_coordinate')
+            for k in range(len(sub_df)-1):
+                G_contours.add_edge(sub_df.iloc[k]['contour_id'],sub_df.iloc[k+1]['contour_id'])
+
+
+        return G_contours,df
 
     #ACCESS DATA
 
@@ -546,7 +615,7 @@ class DataBaseManager:
                 cmd=cmd+" AND is_closed"
             else:
                 cmd=cmd+" AND NOT is_closed"
-        self.cursor.execute(cmd)
+        self.execute(cmd)
         level_open_contours_df=pd.DataFrame(self.cursor.fetchall())
         if len(level_open_contours_df)==0:
             return None
@@ -569,7 +638,7 @@ class DataBaseManager:
         """
         nodes_list='(%s)'%','.join([str(contour_line_id) for contour_line_id in contour_line_ids])
         cmd="SELECT id,elevation,number_points,ST_asText(geometry) AS geometry FROM %s WHERE id IN %s" %(self.contours_lines_table_name,nodes_list)
-        self.cursor.execute(cmd)
+        self.execute(cmd)
         data= self.cursor.fetchall()
         data=pd.DataFrame(data)
         data['geometry']=loads(data['geometry'])
@@ -611,7 +680,7 @@ class DataBaseManager:
         total_length=0
         for k in range(len(path)-1):
             cmd="SELECT elevation FROM %s WHERE osm_id=%i"%(self.osm_nodes_table_name,path[k])
-            self.cursor.execute(cmd)
+            self.execute(cmd)
             elevation=self.cursor.fetchone()['elevation']
             if elevation is not None:
                 edge_coordinates.append(total_length)
@@ -620,7 +689,7 @@ class DataBaseManager:
                 nodes_elevations.append(elevation)
             length=G_osm.get_edge_data(path[k],path[k+1],0)['length']
             cmd="SELECT elevation,edge_coordinate FROM %s WHERE osm_begin=%i AND osm_end=%i AND osm_key=0"%(self.intersections_table_name,path[k],path[k+1])
-            self.cursor.execute(cmd)
+            self.execute(cmd)
             output=self.cursor.fetchall()
             if len(output)>0:
                 output=sorted(output,key=lambda elem:elem['edge_coordinate'])
@@ -628,7 +697,7 @@ class DataBaseManager:
                 elevations+=[elem['elevation'] for elem in output]
             else:
                 cmd="SELECT elevation,edge_coordinate FROM %s WHERE osm_begin=%i AND osm_end=%i AND osm_key=0"%(self.intersections_table_name,path[k+1],path[k])
-                self.cursor.execute(cmd)
+                self.execute(cmd)
                 output=self.cursor.fetchall()
                 if len(output)>0:
                     output=sorted(output,key=lambda elem:-elem['edge_coordinate'])
@@ -636,7 +705,7 @@ class DataBaseManager:
                     elevations+=[elem['elevation'] for elem in output]
             total_length+=length
         cmd="SELECT elevation FROM %s WHERE osm_id=%i"%(self.osm_nodes_table_name,path[-1])
-        self.cursor.execute(cmd)
+        self.execute(cmd)
         elevation=self.cursor.fetchone()['elevation']
         if elevation is not None:
             edge_coordinates.append(total_length)
@@ -648,7 +717,7 @@ class DataBaseManager:
 
 #UTILS INTERSECTION
 
-def update_local_intersection(intersection,current_osm_edges,contours_df,osm_edges_df,max_elevation,elevation_cut):
+def update_local_intersection(intersection,current_osm_edges,contours_df,osm_edges_df,max_elevation,elevation_cut,drop_duplicates=False):
     """This functions adds new intersections and clear edges that have been fully processed.
 
 
@@ -671,6 +740,11 @@ def update_local_intersection(intersection,current_osm_edges,contours_df,osm_edg
     controls the confidence we have : contour lines intersecting some elevation elevation<=max_elevation but no elevation in 
     ]max_elevation-elevation_cut,max_elevation] will be discarded.
 
+    drop_duplicates : see if the contours lines have not been merged properly, one edge will intersect the same physical contour line
+    several times and one should drop duplicate intersections. Should be set to True if lines have not been merged but to False if so
+    to handle bugs caused by the UNIQUE (osm_begin,osm_end,osm_key,edge_coordinate) condition on the inersections table.
+
+
     Returns
     -------
     intersection : the updated intersection
@@ -681,8 +755,11 @@ def update_local_intersection(intersection,current_osm_edges,contours_df,osm_edg
     """
     if len(osm_edges_df)>0:
         local_intersection=gpd.overlay(contours_df,osm_edges_df,keep_geom_type=False).explode(index_parts=False)
+
         if len(local_intersection)>0:
             local_intersection['edge_coordinate']=local_intersection.apply(lambda row:osm_edges_df.loc[row['id_edge']]['geometry'].project(row['geometry']),axis=1)
+            if drop_duplicates:
+                local_intersection=local_intersection.drop_duplicates(subset=['edge','edge_coordinate'])
         if intersection is None:
             intersection=local_intersection
             current_osm_edges=set(local_intersection['edge'])
@@ -818,3 +895,79 @@ def preprocess_osm_graph(G_osm):
     G_osm=ox.project_graph(G_osm,to_crs=osm_crs)
     add_missing_geometries(G_osm)
     return G_osm,osm_crs
+
+
+#MUTLIPROCESS
+def chunk(L,nb_cpu):
+    """This function splits a list 
+    in list of lists to be multiprocessed
+
+    Parameters
+    ----------
+    L : an iterable
+
+    nb_cpu : the number of list of lists, should
+    be equal to the number of avalaible cpus
+
+
+    Returns
+    -------
+    list of lists of files paths
+
+
+
+    """
+    N=len(L)
+    n=max(N//nb_cpu,1)
+    Ls=[L[i:i+n] for i in range(0,N,n)]
+    if len(Ls)>nb_cpu:
+        last=Ls[-1]
+        Ls=Ls[:-1]
+        for k,elem in enumerate(last):
+            Ls[k].append(elem)
+    return Ls
+
+
+def _add_merged_contours_lines(elevations,
+                                   merging_distance=1,
+                                   user='spirz',
+                                   password='this_is_my_PASSWORD_m8',
+                                   host='localhost',
+                                   database='dem_from_contours_lines',
+                                   contours_lines_table_name='contours_lines'):
+    DBM=DataBaseManager(user=user,password=password,host=host,database=database,
+                        contours_lines_table_name=contours_lines_table_name)
+    DBM.add_merged_contours_lines(elevations=elevations,merging_distance=merging_distance)
+    DBM.cursor.close()
+    DBM.cnx.close()
+    
+def add_merged_contours_lines_multiprocess(nb_cpu=None,
+                                   merging_distance=1,
+                                   user='spirz',
+                                   password='this_is_my_PASSWORD_m8',
+                                   host='localhost',
+                                   database='dem_from_contours_lines',
+                                   contours_lines_table_name='contours_lines'):
+
+    cnx = mysql.connector.connect(user=user, 
+                              password=password,
+                              host=host,
+                              database=database,
+                              autocommit=True)
+
+    if nb_cpu is None:
+        nb_cpu=cpu_count()-1
+        print('%i cpus working'%nb_cpu)
+    cursor = cnx.cursor(buffered=True,dictionary=True)
+    cmd="SELECT DISTINCT elevation FROM %s ORDER BY elevation"%contours_lines_table_name
+    cursor.execute(cmd)
+    elevations=[elem['elevation'] for elem in cursor.fetchall()]
+    cursor.close()
+    cnx.close()
+
+    list_of_elevations=chunk(elevations,nb_cpu)
+    args=[(bunch_of_elevations,merging_distance,user,password,host,database,contours_lines_table_name) for bunch_of_elevations in list_of_elevations]
+    with Pool(nb_cpu) as p:
+        p.starmap(_add_merged_contours_lines,args)
+
+

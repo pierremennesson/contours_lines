@@ -2,7 +2,7 @@ import osmnx as ox
 import time
 from multiprocessing import Pool,cpu_count
 import glob
-from lib_contour_lines import *
+from lib_contour_lines import DataBaseManager,preprocess_osm_graph,add_merged_contours_lines_multiprocess
 import mysql.connector
 
 
@@ -21,11 +21,12 @@ intersections_table_name="intersections"
 place_name='Corse, France'
 network_type='drive'
 
-file_paths=glob.glob('COURBE_1-0__SHP_LAMB93_D02B_2021-01-01/COURBE/1_DONNEES_LIVRAISON_2021-01-01/COURBE_1-0_SHP_LAMB93_D02B_2021/*.shp')
-file_paths+=glob.glob('COURBE_1-0__SHP_LAMB93_D02A_2021-01-01/COURBE/1_DONNEES_LIVRAISON_2021-01-01/COURBE_1-0_SHP_LAMB93_D02A_2021/*.shp')
+file_paths=glob.glob('contours_lines_corse/*.shp')
 elevation_column="ALTITUDE"
 
+merge=False
 merging_distance=1.
+drop_duplicates=False
 
 n_bunch_edges=25000
 elevation_step=10
@@ -50,9 +51,13 @@ if __name__ == "__main__":
 	DBM.add_contour_lines_to_database(file_paths,elevation_column=elevation_column)
 	t3=time.time()
 	print('adding contour lines to database took %f'%(t3-t2))
-	DBM.add_merged_contours_lines()
-	t4=time.time()
-	print('merging contour lines took %f'%(t4-t3))
+	if merge:
+		DBM.add_merged_contours_lines()
+
+		t4=time.time()
+		print('merging contour lines took %f'%(t4-t3))
+	else:
+		t4=time.time()
 
 	G_osm=ox.graph_from_place(place_name,network_type=network_type)
 	G_osm,osm_crs=preprocess_osm_graph(G_osm)
@@ -60,7 +65,8 @@ if __name__ == "__main__":
 	print('loading and processing osm graph took %f'%(t5-t4))
 
 	DBM.compute_all_intersections(G_osm,osm_crs,n_bunch_edges=n_bunch_edges,
-							      elevation_step=elevation_step,elevation_cut=elevation_cut)
+							      elevation_step=elevation_step,elevation_cut=elevation_cut,
+							      drop_duplicates=drop_duplicates)
 	t6=time.time()
 	print('computing intersections took %f'%(t6-t5))
 
